@@ -473,9 +473,9 @@ where
 
         match raw_response.clone().try_into() {
             Ok(response) => Ok(response),
-            Err(CompletionError::ResponseError(message))
-                if message == "Response contained no parts" =>
-            {
+            // Some completed events omit items already delivered by the stream.
+            // Key recovery on the wire shape, not the normalizer's error wording.
+            Err(CompletionError::ResponseError(_)) if raw_response.output.is_empty() => {
                 responses_api::streaming::completion_response_from_sse_body(
                     &text,
                     raw_response,
@@ -699,6 +699,163 @@ fn merge_instructions(default_instructions: &str, existing_instructions: Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn complete_sse_fixture(
+        events: Vec<serde_json::Value>,
+        status: &str,
+        output: serde_json::Value,
+    ) -> Result<completion::CompletionResponse<responses_api::CompletionResponse>, CompletionError>
+    {
+        use crate::{client::CompletionClient as _, completion::CompletionModel as _};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        let terminal = serde_json::json!({
+            "type": format!("response.{status}"),
+            "response": {
+                "id": "resp_fixture", "object": "response", "created_at": 1,
+                "status": status, "model": "gpt-5", "output": output,
+                "error": if status == "failed" {
+                    serde_json::json!({"code": "server_error", "message": "fixture failure"})
+                } else { serde_json::Value::Null },
+                "incomplete_details": if status == "incomplete" {
+                    serde_json::json!({"reason": "max_output_tokens"})
+                } else { serde_json::Value::Null },
+                "usage": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
+                "tools": []
+            }
+        });
+        let body = events
+            .into_iter()
+            .chain([terminal])
+            .map(|event| format!("data: {event}\n\n"))
+            .collect::<String>();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let app = axum::Router::new().route(
+            "/responses",
+            axum::routing::post(move |axum::Json(request): axum::Json<serde_json::Value>| {
+                observed.fetch_add(1, Ordering::SeqCst);
+                let body = body.clone();
+                async move {
+                    assert_eq!(request["stream"], true);
+                    ([("content-type", "text/event-stream")], body)
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let client = Client::builder()
+            .api_key("fixture-token")
+            .base_url(format!("http://{address}"))
+            .build()
+            .expect("client");
+        let result = client
+            .completion_model("gpt-5")
+            .completion_request("hello")
+            .send()
+            .await;
+        server.abort();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "recovery must reuse the same response"
+        );
+        result
+    }
+
+    #[tokio::test]
+    async fn completion_recovers_streamed_text_with_empty_terminal_output() {
+        let response = complete_sse_fixture(
+            vec![serde_json::json!({"type": "response.output_text.delta", "delta": "hello"})],
+            "completed",
+            serde_json::json!([]),
+        )
+        .await
+        .expect("streamed text must survive an empty terminal output");
+        let text: String = response
+            .choice
+            .iter()
+            .filter_map(|content| match content {
+                completion::AssistantContent::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "hello");
+        assert_eq!(response.usage.total_tokens, 5);
+    }
+
+    #[tokio::test]
+    async fn completion_recovers_streamed_tool_with_empty_terminal_output() {
+        let response = complete_sse_fixture(
+            vec![serde_json::json!({
+                "type": "response.output_item.done", "output_index": 0,
+                "item": {"type": "function_call", "id": "fc_1", "call_id": "call_1",
+                    "name": "respond", "arguments": "{\"reply\":\"hello\"}", "status": "completed"}
+            })],
+            "completed",
+            serde_json::json!([]),
+        )
+        .await
+        .expect("streamed tool must survive an empty terminal output");
+        let calls: Vec<_> = response
+            .choice
+            .iter()
+            .filter_map(|content| match content {
+                completion::AssistantContent::ToolCall(call) => Some(call),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls.len(), 1);
+        let call = calls.first().expect("tool call");
+        assert_eq!(call.function.name, "respond");
+        assert_eq!(
+            call.function.arguments,
+            serde_json::json!({"reply": "hello"})
+        );
+        assert_eq!(response.usage.total_tokens, 5);
+    }
+
+    #[tokio::test]
+    async fn completion_preserves_terminal_text_without_duplicate_deltas() {
+        let response = complete_sse_fixture(
+            vec![serde_json::json!({"type": "response.output_text.delta", "delta": "hello"})],
+            "completed",
+            serde_json::json!([{
+                "type": "message", "id": "msg_1", "status": "completed", "role": "assistant",
+                "content": [{"type": "output_text", "text": "hello", "annotations": []}]
+            }]),
+        )
+        .await
+        .expect("terminal text");
+        assert_eq!(response.choice.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn completion_rejects_empty_and_unsuccessful_streams() {
+        assert!(
+            complete_sse_fixture(vec![], "completed", serde_json::json!([]))
+                .await
+                .is_err()
+        );
+        for status in ["failed", "incomplete"] {
+            let result = complete_sse_fixture(
+                vec![serde_json::json!({"type": "response.output_text.delta", "delta": "partial"})],
+                status,
+                serde_json::json!([]),
+            )
+            .await;
+            assert!(
+                result.is_err(),
+                "{status} must not recover partial output as success"
+            );
+        }
+    }
 
     #[test]
     fn test_parse_chatgpt_sse_completion() {
