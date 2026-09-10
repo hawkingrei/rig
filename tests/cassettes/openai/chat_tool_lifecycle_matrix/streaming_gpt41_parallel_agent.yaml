@@ -7,7 +7,7 @@ when:
     value: text/event-stream
   - name: content-type
     value: application/json
-  body: '{"max_tokens":128,"messages":[{"content":[{"text":"Follow the user''s tool-call instruction exactly. Do not answer in prose.","type":"text"}],"role":"system"},{"content":"Call alpha with value red and beta with value blue in the same turn, in that order.","role":"user"}],"model":"gpt-4.1-mini","parallel_tool_calls":true,"stream":true,"stream_options":{"include_usage":true},"tool_choice":"required","tools":[{"function":{"description":"Matrix tool alpha","name":"alpha","parameters":{"properties":{"value":{"type":"string"}},"required":["value"],"type":"object"}},"type":"function"},{"function":{"description":"Matrix tool beta","name":"beta","parameters":{"properties":{"value":{"type":"string"}},"required":["value"],"type":"object"}},"type":"function"}]}'
+  body: '{"max_tokens":128,"messages":[{"content":"Follow the user''s tool-call instruction exactly. Do not answer in prose.","role":"system"},{"content":"Call alpha with value red and beta with value blue in the same turn, in that order.","role":"user"}],"model":"gpt-4.1-mini","parallel_tool_calls":true,"stream":true,"stream_options":{"include_usage":true},"tool_choice":"required","tools":[{"function":{"description":"Matrix tool alpha","name":"alpha","parameters":{"properties":{"value":{"type":"string"}},"required":["value"],"type":"object"}},"type":"function"},{"function":{"description":"Matrix tool beta","name":"beta","parameters":{"properties":{"value":{"type":"string"}},"required":["value"],"type":"object"}},"type":"function"}]}'
 then:
   status: 200
   header:

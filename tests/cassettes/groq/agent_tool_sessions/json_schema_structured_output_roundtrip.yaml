@@ -7,7 +7,7 @@ when:
     value: '*/*'
   - name: content-type
     value: application/json
-  body: '{"max_tokens":128,"messages":[{"content":[{"text":"Return only the requested structured object.","type":"text"}],"role":"system"},{"content":"Return lane=canary, risk=low, checks.compile=true, and checks.replay=true.","role":"user"}],"model":"openai/gpt-oss-20b","response_format":{"json_schema":{"name":"StructuredReleasePlan","schema":{"$defs":{"StructuredChecks":{"additionalProperties":false,"properties":{"compile":{"type":"boolean"},"replay":{"type":"boolean"}},"required":["compile","replay"],"type":"object"}},"$schema":"https://json-schema.org/draft/2020-12/schema","additionalProperties":false,"properties":{"checks":{"$ref":"#/$defs/StructuredChecks"},"lane":{"type":"string"},"risk":{"type":"string"}},"required":["lane","checks","risk"],"title":"StructuredReleasePlan","type":"object"},"strict":true},"type":"json_schema"}}'
+  body: '{"max_tokens":128,"messages":[{"content":"Return only the requested structured object.","role":"system"},{"content":"Return lane=canary, risk=low, checks.compile=true, and checks.replay=true.","role":"user"}],"model":"openai/gpt-oss-20b","response_format":{"json_schema":{"name":"StructuredReleasePlan","schema":{"$defs":{"StructuredChecks":{"additionalProperties":false,"properties":{"compile":{"type":"boolean"},"replay":{"type":"boolean"}},"required":["compile","replay"],"type":"object"}},"$schema":"https://json-schema.org/draft/2020-12/schema","additionalProperties":false,"properties":{"checks":{"$ref":"#/$defs/StructuredChecks"},"lane":{"type":"string"},"risk":{"type":"string"}},"required":["lane","checks","risk"],"title":"StructuredReleasePlan","type":"object"},"strict":true},"type":"json_schema"}}'
 then:
   status: 200
   header:

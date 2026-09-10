@@ -7,7 +7,7 @@ when:
     value: '*/*'
   - name: content-type
     value: application/json
-  body: '{"max_tokens":1200,"messages":[{"content":[{"text":"Reason first, then obey the requested tool calls exactly.","type":"text"}],"role":"system"},{"content":"Think briefly about the instruction, then call lookup exactly once with value cobalt. Do not answer in prose.","role":"user"}],"model":"anthropic/claude-haiku-4.5","parallel_tool_calls":false,"provider":{"allow_fallbacks":false,"order":["Anthropic"]},"reasoning":{"max_tokens":1024},"tools":[{"function":{"description":"Record the required lookup value","name":"lookup","parameters":{"additionalProperties":false,"properties":{"value":{"type":"string"}},"required":["value"],"type":"object"}},"type":"function"}]}'
+  body: '{"max_tokens":1200,"messages":[{"content":"Reason first, then obey the requested tool calls exactly.","role":"system"},{"content":"Think briefly about the instruction, then call lookup exactly once with value cobalt. Do not answer in prose.","role":"user"}],"model":"anthropic/claude-haiku-4.5","parallel_tool_calls":false,"provider":{"allow_fallbacks":false,"order":["Anthropic"]},"reasoning":{"max_tokens":1024},"tools":[{"function":{"description":"Record the required lookup value","name":"lookup","parameters":{"additionalProperties":false,"properties":{"value":{"type":"string"}},"required":["value"],"type":"object"}},"type":"function"}]}'
 then:
   status: 200
   header:

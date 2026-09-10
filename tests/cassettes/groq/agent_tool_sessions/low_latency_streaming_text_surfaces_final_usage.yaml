@@ -7,7 +7,7 @@ when:
     value: text/event-stream
   - name: content-type
     value: application/json
-  body: '{"max_tokens":64,"messages":[{"content":[{"text":"Stream the requested short sequence exactly.","type":"text"}],"role":"system"},{"content":"Reply with exactly this comma-separated sequence and no extra words: alpha,beta,gamma,delta,epsilon,zeta,eta,theta","role":"user"}],"model":"llama-3.3-70b-versatile","stream":true,"stream_options":{"include_usage":true}}'
+  body: '{"max_tokens":64,"messages":[{"content":"Stream the requested short sequence exactly.","role":"system"},{"content":"Reply with exactly this comma-separated sequence and no extra words: alpha,beta,gamma,delta,epsilon,zeta,eta,theta","role":"user"}],"model":"llama-3.3-70b-versatile","stream":true,"stream_options":{"include_usage":true}}'
 then:
   status: 200
   header:

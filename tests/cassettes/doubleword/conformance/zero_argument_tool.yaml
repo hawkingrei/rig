@@ -7,7 +7,7 @@ when:
     value: '*/*'
   - name: content-type
     value: application/json
-  body: '{"messages":[{"content":[{"text":"You must use the provided tools. Report tool outputs exactly as returned.","type":"text"}],"role":"system"},{"content":"Call the ping tool, then report the exact marker it returns.","role":"user"}],"model":"Qwen/Qwen3.5-397B-A17B-FP8","temperature":0.0,"tools":[{"function":{"description":"Return the current ping marker. Takes no arguments.","name":"ping","parameters":{"properties":{},"required":[],"type":"object"}},"type":"function"}]}'
+  body: '{"messages":[{"content":"You must use the provided tools. Report tool outputs exactly as returned.","role":"system"},{"content":"Call the ping tool, then report the exact marker it returns.","role":"user"}],"model":"Qwen/Qwen3.5-397B-A17B-FP8","temperature":0.0,"tools":[{"function":{"description":"Return the current ping marker. Takes no arguments.","name":"ping","parameters":{"properties":{},"required":[],"type":"object"}},"type":"function"}]}'
 then:
   status: 200
   header:
@@ -24,7 +24,7 @@ when:
     value: '*/*'
   - name: content-type
     value: application/json
-  body: '{"messages":[{"content":[{"text":"You must use the provided tools. Report tool outputs exactly as returned.","type":"text"}],"role":"system"},{"content":"Call the ping tool, then report the exact marker it returns.","role":"user"},{"reasoning_content":"The user wants me to call the ping tool and report the exact marker it returns. I need to use the ping function which takes no arguments.\n","role":"assistant","tool_calls":[{"function":{"arguments":"{}","name":"ping"},"id":"call_REDACTED_1","type":"function"}]},{"content":"pong-crimson-7423","role":"tool","tool_call_id":"call_REDACTED_1"}],"model":"Qwen/Qwen3.5-397B-A17B-FP8","temperature":0.0,"tools":[{"function":{"description":"Return the current ping marker. Takes no arguments.","name":"ping","parameters":{"properties":{},"required":[],"type":"object"}},"type":"function"}]}'
+  body: '{"messages":[{"content":"You must use the provided tools. Report tool outputs exactly as returned.","role":"system"},{"content":"Call the ping tool, then report the exact marker it returns.","role":"user"},{"reasoning_content":"The user wants me to call the ping tool and report the exact marker it returns. I need to use the ping function which takes no arguments.\n","role":"assistant","tool_calls":[{"function":{"arguments":"{}","name":"ping"},"id":"call_REDACTED_1","type":"function"}]},{"content":"pong-crimson-7423","role":"tool","tool_call_id":"call_REDACTED_1"}],"model":"Qwen/Qwen3.5-397B-A17B-FP8","temperature":0.0,"tools":[{"function":{"description":"Return the current ping marker. Takes no arguments.","name":"ping","parameters":{"properties":{},"required":[],"type":"object"}},"type":"function"}]}'
 then:
   status: 200
   header:

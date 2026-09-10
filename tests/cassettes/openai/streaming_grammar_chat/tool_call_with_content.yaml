@@ -7,7 +7,7 @@ when:
     value: text/event-stream
   - name: content-type
     value: application/json
-  body: '{"messages":[{"content":[{"text":"Before every tool call, first narrate what you are about to do in one short sentence of normal assistant text in the same reply, then emit the tool call. Never call a tool without narrating first.","type":"text"}],"role":"system"},{"content":"Look up the harbor label for me.","role":"user"}],"model":"gpt-4o","stream":true,"stream_options":{"include_usage":true},"tools":[{"function":{"description":"Return the alpha signal marker.","name":"lookup_harbor_label","parameters":{"properties":{},"required":[],"type":"object"}},"type":"function"}]}'
+  body: '{"messages":[{"content":"Before every tool call, first narrate what you are about to do in one short sentence of normal assistant text in the same reply, then emit the tool call. Never call a tool without narrating first.","role":"system"},{"content":"Look up the harbor label for me.","role":"user"}],"model":"gpt-4o","stream":true,"stream_options":{"include_usage":true},"tools":[{"function":{"description":"Return the alpha signal marker.","name":"lookup_harbor_label","parameters":{"properties":{},"required":[],"type":"object"}},"type":"function"}]}'
 then:
   status: 200
   header:

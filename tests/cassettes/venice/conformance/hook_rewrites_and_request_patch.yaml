@@ -7,7 +7,7 @@ when:
     value: '*/*'
   - name: content-type
     value: application/json
-  body: '{"messages":[{"content":[{"text":"Use add for arithmetic and report only the tool result.","type":"text"}],"role":"system"},{"content":"Use add once for x=1 and y=1, then report what the tool returns.","role":"user"}],"model":"mistral-small-3-2-24b-instruct","temperature":0.0,"tool_choice":"required","tools":[{"function":{"description":"Add x and y together","name":"add","parameters":{"properties":{"x":{"description":"The first operand","type":"number"},"y":{"description":"The second operand","type":"number"}},"required":["x","y"],"type":"object"}},"type":"function"}]}'
+  body: '{"messages":[{"content":"Use add for arithmetic and report only the tool result.","role":"system"},{"content":"Use add once for x=1 and y=1, then report what the tool returns.","role":"user"}],"model":"mistral-small-3-2-24b-instruct","temperature":0.0,"tool_choice":"required","tools":[{"function":{"description":"Add x and y together","name":"add","parameters":{"properties":{"x":{"description":"The first operand","type":"number"},"y":{"description":"The second operand","type":"number"}},"required":["x","y"],"type":"object"}},"type":"function"}]}'
 then:
   status: 200
   header:
@@ -24,7 +24,7 @@ when:
     value: '*/*'
   - name: content-type
     value: application/json
-  body: '{"messages":[{"content":[{"text":"Use add for arithmetic and report only the tool result.","type":"text"}],"role":"system"},{"content":"Use add once for x=1 and y=1, then report what the tool returns.","role":"user"},{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"x\":1,\"y\":1}","name":"add"},"id":"call_REDACTED_1","type":"function"}]},{"content":"[portable-redacted]","role":"tool","tool_call_id":"call_REDACTED_1"}],"model":"mistral-small-3-2-24b-instruct","temperature":0.0,"tools":[{"function":{"description":"Add x and y together","name":"add","parameters":{"properties":{"x":{"description":"The first operand","type":"number"},"y":{"description":"The second operand","type":"number"}},"required":["x","y"],"type":"object"}},"type":"function"}]}'
+  body: '{"messages":[{"content":"Use add for arithmetic and report only the tool result.","role":"system"},{"content":"Use add once for x=1 and y=1, then report what the tool returns.","role":"user"},{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"x\":1,\"y\":1}","name":"add"},"id":"call_REDACTED_1","type":"function"}]},{"content":"[portable-redacted]","role":"tool","tool_call_id":"call_REDACTED_1"}],"model":"mistral-small-3-2-24b-instruct","temperature":0.0,"tools":[{"function":{"description":"Add x and y together","name":"add","parameters":{"properties":{"x":{"description":"The first operand","type":"number"},"y":{"description":"The second operand","type":"number"}},"required":["x","y"],"type":"object"}},"type":"function"}]}'
 then:
   status: 200
   header:

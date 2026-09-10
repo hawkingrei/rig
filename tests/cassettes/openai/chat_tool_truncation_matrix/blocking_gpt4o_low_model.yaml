@@ -7,7 +7,7 @@ when:
     value: '*/*'
   - name: content-type
     value: application/json
-  body: '{"max_tokens":16,"messages":[{"content":[{"text":"Call file_report exactly once. Copy the entire user incident verbatim into the required summary argument. Do not answer in prose.","type":"text"}],"role":"system"},{"content":"The cache warmer raced the artifact uploader, the retry storm saturated the queue, three regions were drained by hand, dashboards lagged nine minutes, and rollback took forty minutes.","role":"user"}],"model":"gpt-4o-mini","tool_choice":"required","tools":[{"function":{"description":"File an incident report","name":"file_report","parameters":{"properties":{"summary":{"type":"string"}},"required":["summary"],"type":"object"}},"type":"function"}]}'
+  body: '{"max_tokens":16,"messages":[{"content":"Call file_report exactly once. Copy the entire user incident verbatim into the required summary argument. Do not answer in prose.","role":"system"},{"content":"The cache warmer raced the artifact uploader, the retry storm saturated the queue, three regions were drained by hand, dashboards lagged nine minutes, and rollback took forty minutes.","role":"user"}],"model":"gpt-4o-mini","tool_choice":"required","tools":[{"function":{"description":"File an incident report","name":"file_report","parameters":{"properties":{"summary":{"type":"string"}},"required":["summary"],"type":"object"}},"type":"function"}]}'
 then:
   status: 200
   header:

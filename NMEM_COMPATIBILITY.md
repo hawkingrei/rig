@@ -21,3 +21,8 @@ Rig 0.42 separates the `rig` facade, `rig-core`, and `rig-agent`. Consumers must
 use the facade for agents, migrate hooks/dynamic tools, and preserve old durable
 message formats at their own persistence boundary. App and Cloud must pin this
 same commit. See nowledge-co/mem#3473 for consumer integration and validation.
+
+The OpenAI-compatible replay cassettes deliberately update only system request
+content from text arrays to the string form emitted by this compatibility
+branch. Recorded responses remain unchanged; these request edits are not new
+live-provider recordings.
