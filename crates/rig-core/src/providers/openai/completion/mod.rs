@@ -49,6 +49,18 @@ pub const GPT_5_6_TERRA: &str = "gpt-5.6-terra";
 /// `gpt-5.6-luna` completion model
 pub const GPT_5_6_LUNA: &str = "gpt-5.6-luna";
 
+fn serialize_system_content<S>(content: &[SystemContent], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let text = content
+        .iter()
+        .map(|part| part.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    serializer.serialize_str(&text)
+}
+
 /// `gpt-5.5` completion model
 pub const GPT_5_5: &str = "gpt-5.5";
 
@@ -139,7 +151,10 @@ pub const GPT_4_1: &str = "gpt-4.1";
 pub enum Message {
     #[serde(alias = "developer")]
     System {
-        #[serde(deserialize_with = "string_or_vec")]
+        #[serde(
+            deserialize_with = "string_or_vec",
+            serialize_with = "serialize_system_content"
+        )]
         content: Vec<SystemContent>,
         #[serde(skip_serializing_if = "Option::is_none")]
         name: Option<String>,
@@ -1347,6 +1362,9 @@ pub struct PromptTokensDetails {
     /// Cached tokens from prompt caching
     #[serde(default)]
     pub cached_tokens: usize,
+    /// Prompt tokens written to the provider cache, when reported.
+    #[serde(default)]
+    pub cache_write_tokens: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Default)]
@@ -1438,6 +1456,11 @@ impl Usage {
                 .map(|d| d.cached_tokens as u64)
                 .unwrap_or(0),
         );
+        usage.cache_creation_input_tokens = self
+            .prompt_tokens_details
+            .as_ref()
+            .map(|details| details.cache_write_tokens as u64)
+            .unwrap_or(0);
         usage.reasoning_tokens = self
             .completion_tokens_details
             .as_ref()
@@ -4492,5 +4515,25 @@ mod tests {
             assert_eq!(reassembled.provider_request_id.as_deref(), Some(REQUEST_ID));
             assert_eq!(normalized.provider_request_id.as_deref(), Some(REQUEST_ID));
         }
+    }
+    #[test]
+    fn compatibility_system_message_is_plain_text() {
+        let message = Message::system("System contract");
+        let value = serde_json::to_value(message).expect("system message");
+        assert_eq!(value["content"], "System contract");
+    }
+
+    #[test]
+    fn compatibility_usage_preserves_cache_writes() {
+        let usage: Usage = serde_json::from_value(serde_json::json!({
+            "prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110,
+            "prompt_tokens_details": {"cached_tokens": 70, "cache_write_tokens": 20}
+        }))
+        .expect("usage");
+        let normalized = usage.to_normalized();
+        assert_eq!(normalized.cached_input_tokens, 70);
+        assert_eq!(normalized.cache_creation_input_tokens, 20);
+        assert_eq!(normalized.input_tokens, 100);
+        assert_eq!(normalized.output_tokens, 10);
     }
 }

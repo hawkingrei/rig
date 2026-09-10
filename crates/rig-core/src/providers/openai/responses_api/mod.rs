@@ -1345,8 +1345,42 @@ impl TryFrom<ResponsesRequestParams> for CompletionRequest {
         let ResponsesRequestParams {
             model,
             request: mut req,
-            system_instructions_placement,
+            mut system_instructions_placement,
         } = params;
+        // Preserve caller-selected compatible-gateway fields at the shared
+        // request boundary, before any provider serialization can leak them.
+        if let Some(params) = req
+            .additional_params
+            .as_mut()
+            .and_then(Value::as_object_mut)
+        {
+            if let Some(transport) = params.remove("_rig_preamble_transport") {
+                system_instructions_placement = match transport.as_str() {
+                    Some("instructions") => SystemInstructionsPlacement::Instructions,
+                    Some("system_message") => SystemInstructionsPlacement::InputSystemMessages,
+                    _ => return Err(CompletionError::RequestError(
+                        "Invalid OpenAI Responses _rig_preamble_transport; expected instructions or system_message".into()
+                    )),
+                };
+            }
+            if let Some(value) = params.remove("max_output_tokens") {
+                req.max_tokens = serde_json::from_value::<Option<u64>>(value).map_err(|error| {
+                    CompletionError::RequestError(
+                        format!("Invalid OpenAI Responses max_output_tokens override: {error}")
+                            .into(),
+                    )
+                })?;
+            }
+            if let Some(value) = params.remove("temperature") {
+                req.temperature =
+                    serde_json::from_value::<Option<f64>>(value).map_err(|error| {
+                        CompletionError::RequestError(
+                            format!("Invalid OpenAI Responses temperature override: {error}")
+                                .into(),
+                        )
+                    })?;
+            }
+        }
         let chat_history = req.chat_history_with_documents();
         let model = req.model.clone().unwrap_or(model);
         let preamble = req.preamble.take();
@@ -3751,6 +3785,32 @@ mod tests {
             additional_params: None,
             output_schema: None,
             record_telemetry_content: false,
+        }
+    }
+
+    #[test]
+    fn compatibility_gateway_controls_are_consumed_and_omit_unsupported_fields() {
+        for transport in ["instructions", "system_message"] {
+            let mut request = request_with_preamble("System contract");
+            request.max_tokens = Some(64);
+            request.temperature = Some(0.7);
+            request.additional_params = Some(json!({
+                "_rig_preamble_transport": transport,
+                "max_output_tokens": null,
+                "temperature": null,
+                "store": false,
+            }));
+            let wire = CompletionRequest::try_from(("compatible".into(), request)).unwrap();
+            let value = serde_json::to_value(wire).unwrap();
+            assert!(value.get("max_output_tokens").is_none());
+            assert!(value.get("temperature").is_none());
+            assert!(value.get("_rig_preamble_transport").is_none());
+            assert_eq!(value["store"], false);
+            if transport == "instructions" {
+                assert_eq!(value["instructions"], "System contract");
+            } else {
+                assert_eq!(value["input"][0]["role"], "system");
+            }
         }
     }
 

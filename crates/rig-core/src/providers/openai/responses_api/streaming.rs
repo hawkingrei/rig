@@ -425,6 +425,8 @@ pub(crate) struct RawChoiceAccumulator {
     /// Deltas without an `item_id` (ChatGPT's envelope-less replays) extend
     /// the open block, or open a boundary-minted one downstream.
     current_text_item: Option<String>,
+    emitted_text_parts: std::collections::HashSet<(u64, u64)>,
+    terminal_text: Vec<StreamingRawChoice>,
 }
 
 impl RawChoiceAccumulator {
@@ -447,6 +449,8 @@ impl RawChoiceAccumulator {
                 ),
             pending_call_ids: std::collections::HashMap::new(),
             current_text_item: None,
+            emitted_text_parts: std::collections::HashSet::new(),
+            terminal_text: Vec::new(),
         }
     }
 
@@ -552,10 +556,40 @@ impl RawChoiceAccumulator {
             // Text and refusal deltas are the same visible-text stream: a
             // refusal is the assistant's message for that turn, and both
             // (re)open the item's text block before their fragment.
-            ItemChunkKind::OutputTextDelta(DeltaTextChunk { delta, .. })
-            | ItemChunkKind::RefusalDelta(DeltaTextChunk { delta, .. }) => {
+            ItemChunkKind::OutputTextDelta(DeltaTextChunk {
+                delta,
+                content_index,
+                ..
+            })
+            | ItemChunkKind::RefusalDelta(DeltaTextChunk {
+                delta,
+                content_index,
+                ..
+            }) => {
+                self.emitted_text_parts
+                    .insert((output_index, content_index));
                 self.start_text_item(&outer_item_id, &mut immediate);
                 immediate.push(streaming::RawStreamingChoice::Message(delta));
+            }
+            ItemChunkKind::OutputTextDone(done) => {
+                if !done.text.is_empty()
+                    && self
+                        .emitted_text_parts
+                        .insert((output_index, done.content_index))
+                {
+                    self.start_text_item(&outer_item_id, &mut immediate);
+                    immediate.push(streaming::RawStreamingChoice::Message(done.text));
+                }
+            }
+            ItemChunkKind::RefusalDone(done) => {
+                if !done.refusal.is_empty()
+                    && self
+                        .emitted_text_parts
+                        .insert((output_index, done.content_index))
+                {
+                    self.start_text_item(&outer_item_id, &mut immediate);
+                    immediate.push(streaming::RawStreamingChoice::Message(done.refusal));
+                }
             }
             // Summary and raw-reasoning deltas differ only in which wire
             // event carries them; both are fragments of the output item's
@@ -614,6 +648,31 @@ impl RawChoiceAccumulator {
             // downstream, matching the unary path's `map_finish_reason`.
             ResponseChunkKind::ResponseCompleted | ResponseChunkKind::ResponseIncomplete => {
                 self.saw_terminal = true;
+                if matches!(kind, ResponseChunkKind::ResponseCompleted) {
+                    for (output_index, output) in response.output.iter().enumerate() {
+                        let Output::Message(message) = output else {
+                            continue;
+                        };
+                        for (content_index, content) in message.content.iter().enumerate() {
+                            if !self
+                                .emitted_text_parts
+                                .insert((output_index as u64, content_index as u64))
+                            {
+                                continue;
+                            }
+                            let text = match content {
+                                super::AssistantContent::OutputText(text) => &text.text,
+                                super::AssistantContent::Refusal { refusal } => refusal,
+                            };
+                            if !text.is_empty() {
+                                let mut choices = Vec::new();
+                                self.start_text_item(&Some(message.id.clone()), &mut choices);
+                                choices.push(streaming::RawStreamingChoice::Message(text.clone()));
+                                self.terminal_text.extend(choices);
+                            }
+                        }
+                    }
+                }
                 // The provider proved the turn ended, so a slot still open
                 // here lost only its `output_item.done` frame — the same
                 // terminal-drain the sibling adapters ship (Interactions at
@@ -797,6 +856,7 @@ impl RawChoiceAccumulator {
     pub(crate) fn finish(mut self) -> Vec<StreamingRawChoice> {
         let mut choices = Vec::new();
         choices.append(&mut self.tool_calls);
+        choices.append(&mut self.terminal_text);
         // Only a genuine terminal event (`response.completed` or
         // `response.incomplete`) counts as the provider ending the turn; a
         // stream that ended without one was truncated,
@@ -1786,6 +1846,74 @@ mod tests {
             tools: Vec::new(),
             additional_parameters: AdditionalParameters::default(),
         }
+    }
+
+    #[test]
+    fn compatibility_recovers_done_only_text_without_repeating_deltas() {
+        for refusal in [false, true] {
+            for streamed in [false, true] {
+                let mut events = Vec::new();
+                if streamed {
+                    events.push(json!({
+                        "type": if refusal { "response.refusal.delta" } else { "response.output_text.delta" },
+                        "item_id": "msg_1", "output_index": 0, "content_index": 0,
+                        "sequence_number": 1, "delta": "answer",
+                    }));
+                }
+                let mut done = json!({
+                    "type": if refusal { "response.refusal.done" } else { "response.output_text.done" },
+                    "item_id": "msg_1", "output_index": 0, "content_index": 0,
+                    "sequence_number": 2,
+                });
+                done[if refusal { "refusal" } else { "text" }] = json!("answer");
+                events.push(done);
+                events.push(json!({"type": "response.completed", "sequence_number": 3,
+                    "response": sample_response(ResponseStatus::Completed)}));
+                let body = events
+                    .iter()
+                    .map(|event| format!("data: {event}\n\n"))
+                    .collect::<String>();
+                let choices = raw_choices_from_sse_body(&body, ResponsesUsage::new()).unwrap();
+                let text = choices
+                    .iter()
+                    .filter_map(|choice| match choice {
+                        RawStreamingChoice::Message(text) => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<String>();
+                assert_eq!(text, "answer", "refusal={refusal}, streamed={streamed}");
+            }
+        }
+    }
+
+    #[test]
+    fn compatibility_recovers_each_unseen_terminal_text_part_once() {
+        let mut response = sample_response(ResponseStatus::Completed);
+        response.output = serde_json::from_value(json!([
+            {"type":"message", "id":"msg_1", "role":"assistant", "status":"completed", "content":[
+                {"type":"output_text", "text":"first", "annotations":[]},
+                {"type":"output_text", "text":"second", "annotations":[]}
+            ]}
+        ]))
+        .unwrap();
+        let events = [
+            json!({"type":"response.output_text.delta", "item_id":"msg_1", "output_index":0,
+                "content_index":0, "sequence_number":1, "delta":"first"}),
+            json!({"type":"response.completed", "sequence_number":2, "response":response}),
+        ];
+        let body = events
+            .iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .collect::<String>();
+        let choices = raw_choices_from_sse_body(&body, ResponsesUsage::new()).unwrap();
+        let text = choices
+            .iter()
+            .filter_map(|choice| match choice {
+                RawStreamingChoice::Message(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(text, "firstsecond");
     }
 
     async fn first_error_from_event(

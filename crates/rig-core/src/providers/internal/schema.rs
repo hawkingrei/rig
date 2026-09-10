@@ -30,14 +30,21 @@ pub(crate) fn sanitize_schema(schema: &mut serde_json::Value, options: SanitizeO
             return;
         }
 
-        let is_object_schema = obj.get("type") == Some(&Value::String("object".to_string()))
-            || obj.contains_key("properties");
-
-        if options.inject_empty_properties && is_object_schema && !obj.contains_key("properties") {
-            obj.insert("properties".to_string(), Value::Object(Default::default()));
+        if let Some(additional_properties) = obj.remove("additional_properties") {
+            obj.entry("additionalProperties".to_string())
+                .or_insert(additional_properties);
         }
+        let is_object_schema = obj.get("type") == Some(&Value::String("object".to_string()))
+            || obj.contains_key("properties")
+            || obj.contains_key("additionalProperties");
 
-        if is_object_schema && !obj.contains_key("additionalProperties") {
+        if is_object_schema {
+            obj.entry("type".to_string())
+                .or_insert_with(|| Value::String("object".to_string()));
+            if options.inject_empty_properties {
+                obj.entry("properties".to_string())
+                    .or_insert_with(|| Value::Object(Default::default()));
+            }
             obj.insert("additionalProperties".to_string(), Value::Bool(false));
         }
 
@@ -106,6 +113,37 @@ pub(crate) fn sanitize_schema(schema: &mut serde_json::Value, options: SanitizeO
                     sanitize_schema(variant, options);
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn strict_object_schemas_normalize_additional_properties() {
+        for key in ["additionalProperties", "additional_properties"] {
+            let mut schema = json!({"type": "object", "properties": {
+                "filters": {key: {"type": "string"}}
+            }, "additionalProperties": true});
+            sanitize_schema(
+                &mut schema,
+                SanitizeOptions {
+                    strip_ref_siblings: true,
+                    inject_empty_properties: true,
+                    strip_numeric_constraints: false,
+                },
+            );
+            assert_eq!(schema["additionalProperties"], false);
+            assert_eq!(
+                schema["properties"]["filters"],
+                json!({
+                    "type": "object", "properties": {}, "required": [],
+                    "additionalProperties": false
+                })
+            );
         }
     }
 }

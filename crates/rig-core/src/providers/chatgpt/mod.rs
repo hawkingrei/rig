@@ -82,6 +82,7 @@ impl Debug for ChatGPTAuth {
 #[derive(Debug, Clone)]
 pub struct ChatGPTBuilder {
     auth_file: Option<PathBuf>,
+    oauth_http_client: Option<reqwest::Client>,
     default_instructions: Option<String>,
     device_code_handler: auth::DeviceCodeHandler,
     allow_device_flow: bool,
@@ -116,6 +117,7 @@ impl Default for ChatGPTBuilder {
     fn default() -> Self {
         Self {
             auth_file: default_auth_file(),
+            oauth_http_client: None,
             default_instructions: Some(
                 std::env::var("CHATGPT_DEFAULT_INSTRUCTIONS")
                     .ok()
@@ -201,6 +203,7 @@ impl ProviderBuilder for ChatGPTBuilder {
             auth: auth::Authenticator::new(
                 auth,
                 ext.auth_file.clone(),
+                ext.oauth_http_client.clone(),
                 ext.device_code_handler.clone(),
                 ext.allow_device_flow,
             ),
@@ -250,6 +253,20 @@ impl<H> client::ClientBuilder<ChatGPTBuilder, crate::markers::Missing, H> {
 }
 
 impl<H> ClientBuilder<H> {
+    /// Set the HTTP client used for ChatGPT OAuth device-code and token-refresh
+    /// requests.
+    ///
+    /// This is separate from [`client::ClientBuilder::http_client`] because
+    /// provider requests support any Rig HTTP backend, while native OAuth uses
+    /// reqwest directly. Rig's default OAuth client is bounded; long-running
+    /// services may supply tighter connect and request deadlines here.
+    pub fn oauth_http_client(self, http_client: reqwest::Client) -> Self {
+        self.over_ext(|mut ext| {
+            ext.oauth_http_client = Some(http_client);
+            ext
+        })
+    }
+
     pub fn on_device_code<F>(self, handler: F) -> Self
     where
         F: Fn(auth::DeviceCodePrompt) + Send + Sync + 'static,
