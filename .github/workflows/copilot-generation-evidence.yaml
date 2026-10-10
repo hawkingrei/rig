@@ -27,7 +27,7 @@ jobs:
           p.write_text(source.replace('.checked_add(1)', '.checked_add(0)'))
           PY
           set +e
-          cargo test --locked -p rig-core --lib providers::copilot::auth::native::tests -- --nocapture > evidence/red.log 2>&1
+          CARGO_TERM_COLOR=never RUST_BACKTRACE=0 cargo test --locked -p rig-core --lib providers::copilot::auth::native::tests -- --test-threads=1 > evidence/red.log 2>&1
           red=$?
           set -e
           cat evidence/red.log
@@ -35,7 +35,7 @@ jobs:
           grep -E 'copilot_disconnect_revokes_pending_device_login_with_empty_cache.*FAILED' evidence/red.log
           grep -E 'copilot_newest_device_login_owns_commit_without_disconnect.*FAILED' evidence/red.log
           git show 13999c389d59224b0d9dbb850506c9a6dcc6c785:crates/rig-core/src/providers/copilot/auth/native.rs > crates/rig-core/src/providers/copilot/auth/native.rs
-          cargo test --locked -p rig-core --lib providers::copilot::auth::native::tests -- --nocapture > evidence/green.log 2>&1
+          CARGO_TERM_COLOR=never RUST_BACKTRACE=0 cargo test --locked -p rig-core --lib providers::copilot::auth::native::tests -- --test-threads=1 > evidence/green.log 2>&1
           cat evidence/green.log
           grep -E 'test result: ok\. [1-9][0-9]* passed' evidence/green.log
       - uses: actions/upload-artifact@v5
