@@ -19,6 +19,25 @@ const DEVICE_CODE_POLL_SLEEP_SECONDS: u64 = 5;
 const DEVICE_CODE_TIMEOUT_SECONDS: u64 = 15 * 60;
 const DEVICE_CODE_SLOW_DOWN_SECONDS: u64 = 5;
 
+/// Disconnect using the same commit lock as refresh and fresh sign-in.
+pub fn clear_oauth_cache(
+    access_token: &std::path::Path,
+    api_key: &std::path::Path,
+) -> std::io::Result<usize> {
+    let _guard = AUTH_CACHE_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut removed = 0;
+    for path in [access_token, api_key] {
+        match std::fs::remove_file(path) {
+            Ok(()) => removed += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(removed)
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct PlatformAuthenticator {
     access_token_file: Option<PathBuf>,
@@ -85,6 +104,7 @@ impl PlatformAuthenticator {
 
     async fn auth_context_oauth_at(&self, endpoint: &str) -> Result<AuthContext, AuthError> {
         let record: ApiKeyRecord = read_json_record(self.api_key_file.as_deref())?;
+        let expected_record = record.clone();
         let cached_access_token = self.read_access_token().ok().flatten();
         let api_base = record.api_base();
         if record.reauth_required
@@ -134,7 +154,7 @@ impl PlatformAuthenticator {
             Err(err) => return Err(err),
         };
         let api_base = record.api_base();
-        self.write_record_if_current(&bootstrap, &record, None)?;
+        self.write_record_if_current(&bootstrap, &record, Some(&expected_record))?;
         Ok(AuthContext {
             api_key: record.token.unwrap_or_default(),
             api_base,
@@ -145,7 +165,18 @@ impl PlatformAuthenticator {
         &self,
         access_token: &str,
     ) -> Result<AuthContext, AuthError> {
+        self.auth_context_with_github_access_token_at(access_token, GITHUB_API_KEY_URL)
+            .await
+    }
+
+    async fn auth_context_with_github_access_token_at(
+        &self,
+        access_token: &str,
+        endpoint: &str,
+    ) -> Result<AuthContext, AuthError> {
         let record: ApiKeyRecord = read_json_record(self.api_key_file.as_deref())?;
+        let expected_record = record.clone();
+        let expected_bootstrap = self.read_access_token()?;
         let api_base = record.api_base();
         if record.can_reuse_for_bootstrap_token(access_token)
             && let Some(token) = record.token
@@ -157,11 +188,23 @@ impl PlatformAuthenticator {
         }
 
         let record = self
-            .refresh_api_key(access_token)
+            .refresh_api_key_at(access_token, endpoint)
             .await?
             .bind_to_bootstrap_token(access_token);
         let api_base = record.api_base();
-        write_json_record(self.api_key_file.as_deref(), &record)?;
+        {
+            let _guard = AUTH_CACHE_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let current_record: ApiKeyRecord = read_json_record(self.api_key_file.as_deref())?;
+            if current_record != expected_record || self.read_access_token()? != expected_bootstrap
+            {
+                return Err(AuthError::Message(
+                    "GitHub Copilot credentials changed during refresh. Try again.".into(),
+                ));
+            }
+            write_json_record(self.api_key_file.as_deref(), &record)?;
+        }
         Ok(AuthContext {
             api_key: record.token.unwrap_or_default(),
             api_base,
@@ -259,11 +302,6 @@ impl PlatformAuthenticator {
         Err(AuthError::Message(
             "Timed out waiting for GitHub Copilot device authorization".into(),
         ))
-    }
-
-    async fn refresh_api_key(&self, access_token: &str) -> Result<ApiKeyRecord, AuthError> {
-        self.refresh_api_key_at(access_token, GITHUB_API_KEY_URL)
-            .await
     }
 
     async fn refresh_api_key_at(
@@ -398,7 +436,9 @@ impl ApiKeyRecord {
 
         match bootstrap_token {
             Some(bootstrap_token) => self.matches_bootstrap_token(bootstrap_token),
-            None => true,
+            // Legacy standalone API keys remain usable; a bootstrap-bound key
+            // cannot outlive the login that owns it.
+            None => self.bootstrap_token_fingerprint.is_none(),
         }
     }
 
@@ -492,7 +532,9 @@ mod tests {
     };
     use reqwest::StatusCode;
 
-    async fn rejected_refresh() -> (
+    async fn refresh_reply(
+        reply: Vec<u8>,
+    ) -> (
         String,
         tokio::sync::oneshot::Receiver<()>,
         tokio::sync::oneshot::Sender<()>,
@@ -512,14 +554,20 @@ mod tests {
             }
             seen_tx.send(()).unwrap();
             release_rx.await.unwrap();
-            stream
-                .write_all(
-                    b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                )
-                .await
-                .unwrap();
+            stream.write_all(&reply).await.unwrap();
         });
         (url, seen_rx, release_tx)
+    }
+
+    async fn rejected_refresh() -> (
+        String,
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        refresh_reply(
+            b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+        )
+        .await
     }
 
     fn isolated_auth(dir: &assert_fs::TempDir) -> PlatformAuthenticator {
@@ -604,7 +652,13 @@ mod tests {
                     auth.write_record_if_current("synthetic-bootstrap-a", &fresh, None)
                         .unwrap();
                 }
-                _ => std::fs::remove_file(auth.access_token_file.as_ref().unwrap()).unwrap(),
+                _ => {
+                    super::clear_oauth_cache(
+                        auth.access_token_file.as_ref().unwrap(),
+                        auth.api_key_file.as_ref().unwrap(),
+                    )
+                    .unwrap();
+                }
             }
             release.send(()).unwrap();
             assert!(
@@ -652,6 +706,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn copilot_late_success_preserves_newer_terminal_key_or_disconnect() {
+        for explicit in [false, true] {
+            for change in ["terminal", "key", "disconnect"] {
+                let dir = assert_fs::TempDir::new().unwrap();
+                let auth = isolated_auth(&dir);
+                let body = r#"{"token":"synthetic-late-key","expires_at":9223372036854775807}"#;
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let (url, seen, release) = refresh_reply(reply.into_bytes()).await;
+                let task = tokio::spawn({
+                    let auth = auth.clone();
+                    async move {
+                        if explicit {
+                            auth.auth_context_with_github_access_token_at(
+                                "synthetic-bootstrap-a",
+                                &url,
+                            )
+                            .await
+                        } else {
+                            auth.auth_context_oauth_at(&url).await
+                        }
+                    }
+                });
+                seen.await.unwrap();
+                match change {
+                    "terminal" => auth
+                        .retain_terminal_rejection(
+                            "synthetic-bootstrap-a",
+                            &ApiKeyRecord::default(),
+                        )
+                        .unwrap(),
+                    "key" => {
+                        let fresh = ApiKeyRecord {
+                            token: Some("synthetic-new-key".into()),
+                            expires_at: Some(i64::MAX),
+                            ..ApiKeyRecord::default()
+                        }
+                        .bind_to_bootstrap_token("synthetic-bootstrap-a");
+                        auth.write_record_if_current("synthetic-bootstrap-a", &fresh, None)
+                            .unwrap();
+                    }
+                    _ => {
+                        super::clear_oauth_cache(
+                            auth.access_token_file.as_ref().unwrap(),
+                            auth.api_key_file.as_ref().unwrap(),
+                        )
+                        .unwrap();
+                    }
+                }
+                release.send(()).unwrap();
+                assert!(
+                    task.await
+                        .unwrap()
+                        .unwrap_err()
+                        .to_string()
+                        .contains("credentials changed")
+                );
+                let record: ApiKeyRecord =
+                    super::read_json_record(auth.api_key_file.as_deref()).unwrap();
+                match change {
+                    "terminal" => assert!(record.reauth_required),
+                    "key" => assert_eq!(record.token.as_deref(), Some("synthetic-new-key")),
+                    _ => {
+                        assert!(auth.read_access_token().unwrap().is_none());
+                        assert!(!auth.api_key_file.as_ref().unwrap().exists());
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn noninteractive_oauth_requires_sign_in_instead_of_device_flow() {
         let auth = PlatformAuthenticator::new(None, None, DeviceCodeHandler::default(), false);
         let err = auth
@@ -689,7 +817,7 @@ mod tests {
 
         assert!(record.can_reuse_for_oauth(Some("github-token-a")));
         assert!(!record.can_reuse_for_oauth(Some("github-token-b")));
-        assert!(record.can_reuse_for_oauth(None));
+        assert!(!record.can_reuse_for_oauth(None));
     }
 
     #[test]
