@@ -13,6 +13,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: 13999c389d59224b0d9dbb850506c9a6dcc6c785
       - uses: ./.github/actions/rust-setup
       - name: Exercise the same owner assertions against mutation and restoration
         shell: bash
