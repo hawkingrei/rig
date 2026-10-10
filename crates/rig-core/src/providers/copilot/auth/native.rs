@@ -4,10 +4,13 @@ use crate::providers::internal::device_auth::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-static AUTH_CACHE_LOCK: Mutex<()> = Mutex::new(());
+// Keep generations after deletion: an empty cache can still have a revoked
+// device login waiting to write its first token.
+static AUTH_CACHE_LOCK: Mutex<BTreeMap<PathBuf, u64>> = Mutex::new(BTreeMap::new());
 const REAUTH_REQUIRED: &str =
     "GitHub Copilot sign-in required. Reconnect Copilot in Settings before using this provider.";
 
@@ -19,14 +22,27 @@ const DEVICE_CODE_POLL_SLEEP_SECONDS: u64 = 5;
 const DEVICE_CODE_TIMEOUT_SECONDS: u64 = 15 * 60;
 const DEVICE_CODE_SLOW_DOWN_SECONDS: u64 = 5;
 
-/// Disconnect using the same commit lock as refresh and fresh sign-in.
+fn advance_cache_generation(
+    generations: &mut BTreeMap<PathBuf, u64>,
+    access_token: &std::path::Path,
+) -> std::io::Result<u64> {
+    let generation = generations.entry(access_token.to_path_buf()).or_default();
+    *generation = generation
+        .checked_add(1)
+        .ok_or_else(|| std::io::Error::other("GitHub Copilot cache generation exhausted"))?;
+    Ok(*generation)
+}
+
+/// Revoke pending device logins and disconnect under the auth commit lock.
+/// Revocation applies even when cache files are absent or cannot be removed.
 pub fn clear_oauth_cache(
     access_token: &std::path::Path,
     api_key: &std::path::Path,
 ) -> std::io::Result<usize> {
-    let _guard = AUTH_CACHE_LOCK
+    let mut generations = AUTH_CACHE_LOCK
         .lock()
         .unwrap_or_else(|error| error.into_inner());
+    advance_cache_generation(&mut generations, access_token)?;
     let mut removed = 0;
     for path in [access_token, api_key] {
         match std::fs::remove_file(path) {
@@ -354,13 +370,40 @@ impl PlatformAuthenticator {
         }
     }
 
+    fn begin_access_token_login(&self) -> Result<Option<u64>, AuthError> {
+        let mut generations = AUTH_CACHE_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        // A newer interactive login owns the eventual write, including when
+        // its predecessor completes before the new device flow finishes.
+        self.access_token_file
+            .as_ref()
+            .map(|path| advance_cache_generation(&mut generations, path))
+            .transpose()
+            .map_err(Into::into)
+    }
+
+    #[cfg(test)]
     fn write_access_token(&self, token: &str) -> Result<(), AuthError> {
-        let _guard = AUTH_CACHE_LOCK
+        self.write_access_token_if_current(token, self.begin_access_token_login()?)
+    }
+
+    fn write_access_token_if_current(
+        &self,
+        token: &str,
+        expected_generation: Option<u64>,
+    ) -> Result<(), AuthError> {
+        let generations = AUTH_CACHE_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let Some(path) = &self.access_token_file else {
             return Ok(());
         };
+        if Some(generations.get(path).copied().unwrap_or_default()) != expected_generation {
+            return Err(AuthError::Message(
+                "GitHub Copilot credentials changed during sign-in. Try again.".into(),
+            ));
+        }
 
         ensure_parent_dir(path)?;
         std::fs::write(path, token.as_bytes())?;
@@ -409,14 +452,23 @@ impl PlatformAuthenticator {
     }
 
     async fn reauthenticate_access_token(&self) -> Result<String, AuthError> {
+        self.reauthenticate_access_token_with(self.login_device_flow())
+            .await
+    }
+
+    async fn reauthenticate_access_token_with(
+        &self,
+        login: impl std::future::Future<Output = Result<String, AuthError>>,
+    ) -> Result<String, AuthError> {
         if !self.allow_device_flow {
             return Err(AuthError::Message(
                 "GitHub Copilot sign-in required. Reconnect Copilot in Settings before using this provider."
                     .into(),
             ));
         }
-        let token = self.login_device_flow().await?;
-        self.write_access_token(&token)?;
+        let generation = self.begin_access_token_login()?;
+        let token = login.await?;
+        self.write_access_token_if_current(&token, generation)?;
         Ok(token)
     }
 }
@@ -579,6 +631,254 @@ mod tests {
         );
         auth.write_access_token("synthetic-bootstrap-a").unwrap();
         auth
+    }
+
+    fn isolated_device_auth(dir: &assert_fs::TempDir) -> PlatformAuthenticator {
+        PlatformAuthenticator::new(
+            Some(dir.path().join("access-token")),
+            Some(dir.path().join("api-key.json")),
+            DeviceCodeHandler::default(),
+            true,
+        )
+    }
+
+    fn pending_device_login(
+        auth: &PlatformAuthenticator,
+    ) -> (
+        tokio::task::JoinHandle<Result<String, super::AuthError>>,
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<String>,
+    ) {
+        let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let auth = auth.clone();
+        let task = tokio::spawn(async move {
+            auth.reauthenticate_access_token_with(async move {
+                // This future is first polled after the production owner has
+                // claimed its cache generation, before any token is returned.
+                seen_tx.send(()).unwrap();
+                Ok(release_rx.await.unwrap())
+            })
+            .await
+        });
+        (task, seen_rx, release_tx)
+    }
+
+    #[tokio::test]
+    async fn copilot_disconnect_revokes_pending_device_login_with_empty_cache() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let auth = isolated_device_auth(&dir);
+        let (task, seen, release) = pending_device_login(&auth);
+        seen.await.unwrap();
+
+        assert_eq!(
+            super::clear_oauth_cache(
+                auth.access_token_file.as_ref().unwrap(),
+                auth.api_key_file.as_ref().unwrap(),
+            )
+            .unwrap(),
+            0
+        );
+        release.send("synthetic-revoked-bootstrap".into()).unwrap();
+        assert!(
+            task.await
+                .unwrap()
+                .unwrap_err()
+                .to_string()
+                .contains("credentials changed")
+        );
+        assert!(!auth.access_token_file.as_ref().unwrap().exists());
+        assert!(!auth.api_key_file.as_ref().unwrap().exists());
+    }
+
+    #[tokio::test]
+    async fn copilot_newest_device_login_owns_commit_without_disconnect() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let auth = isolated_device_auth(&dir);
+        let (old_task, old_seen, old_release) = pending_device_login(&auth);
+        old_seen.await.unwrap();
+        let (new_task, new_seen, new_release) = pending_device_login(&auth);
+        new_seen.await.unwrap();
+
+        new_release.send("synthetic-new-bootstrap".into()).unwrap();
+        assert_eq!(new_task.await.unwrap().unwrap(), "synthetic-new-bootstrap");
+        old_release.send("synthetic-old-bootstrap".into()).unwrap();
+        assert!(
+            old_task
+                .await
+                .unwrap()
+                .unwrap_err()
+                .to_string()
+                .contains("credentials changed")
+        );
+        assert_eq!(
+            auth.read_access_token().unwrap().as_deref(),
+            Some("synthetic-new-bootstrap")
+        );
+    }
+
+    #[tokio::test]
+    async fn copilot_new_login_claim_revokes_old_completion_before_new_commit() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let auth = isolated_device_auth(&dir);
+        let (old_task, old_seen, old_release) = pending_device_login(&auth);
+        old_seen.await.unwrap();
+        let (new_task, new_seen, new_release) = pending_device_login(&auth);
+        new_seen.await.unwrap();
+
+        old_release.send("synthetic-old-bootstrap".into()).unwrap();
+        assert!(old_task.await.unwrap().is_err());
+        assert!(auth.read_access_token().unwrap().is_none());
+        new_release.send("synthetic-new-bootstrap".into()).unwrap();
+        assert_eq!(new_task.await.unwrap().unwrap(), "synthetic-new-bootstrap");
+    }
+
+    #[tokio::test]
+    async fn copilot_refresh_snapshot_allows_pending_login_but_rejects_fresh_commit() {
+        for explicit in [false, true] {
+            for refresh_finishes_first in [false, true] {
+                let dir = assert_fs::TempDir::new().unwrap();
+                let auth = isolated_device_auth(&dir);
+                auth.write_access_token("synthetic-bootstrap-a").unwrap();
+                let body =
+                    r#"{"token":"synthetic-refreshed-key","expires_at":9223372036854775807}"#;
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let (url, seen, release) = refresh_reply(reply.into_bytes()).await;
+                let refresh = tokio::spawn({
+                    let auth = auth.clone();
+                    async move {
+                        if explicit {
+                            auth.auth_context_with_github_access_token_at(
+                                "synthetic-bootstrap-a",
+                                &url,
+                            )
+                            .await
+                        } else {
+                            auth.auth_context_oauth_at(&url).await
+                        }
+                    }
+                });
+                seen.await.unwrap();
+                let (login, login_seen, login_release) = pending_device_login(&auth);
+                login_seen.await.unwrap();
+
+                if refresh_finishes_first {
+                    release.send(()).unwrap();
+                    assert_eq!(
+                        refresh.await.unwrap().unwrap().api_key,
+                        "synthetic-refreshed-key"
+                    );
+                    login_release.send("synthetic-bootstrap-b".into()).unwrap();
+                    assert_eq!(login.await.unwrap().unwrap(), "synthetic-bootstrap-b");
+                } else {
+                    login_release.send("synthetic-bootstrap-b".into()).unwrap();
+                    assert_eq!(login.await.unwrap().unwrap(), "synthetic-bootstrap-b");
+                    release.send(()).unwrap();
+                    assert!(
+                        refresh
+                            .await
+                            .unwrap()
+                            .unwrap_err()
+                            .to_string()
+                            .contains("credentials changed")
+                    );
+                    assert!(!auth.api_key_file.as_ref().unwrap().exists());
+                }
+                assert_eq!(
+                    auth.read_access_token().unwrap().as_deref(),
+                    Some("synthetic-bootstrap-b")
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn copilot_reconnect_after_disconnect_preserves_new_credentials() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let auth = isolated_device_auth(&dir);
+        let (old_task, seen, release) = pending_device_login(&auth);
+        seen.await.unwrap();
+        super::clear_oauth_cache(
+            auth.access_token_file.as_ref().unwrap(),
+            auth.api_key_file.as_ref().unwrap(),
+        )
+        .unwrap();
+
+        auth.reauthenticate_access_token_with(async { Ok("synthetic-new-bootstrap".into()) })
+            .await
+            .unwrap();
+        let fresh = ApiKeyRecord {
+            token: Some("synthetic-new-key".into()),
+            expires_at: Some(i64::MAX),
+            ..ApiKeyRecord::default()
+        }
+        .bind_to_bootstrap_token("synthetic-new-bootstrap");
+        auth.write_record_if_current("synthetic-new-bootstrap", &fresh, None)
+            .unwrap();
+
+        release.send("synthetic-old-bootstrap".into()).unwrap();
+        assert!(old_task.await.unwrap().is_err());
+        assert_eq!(
+            auth.read_access_token().unwrap().as_deref(),
+            Some("synthetic-new-bootstrap")
+        );
+        let record: ApiKeyRecord = super::read_json_record(auth.api_key_file.as_deref()).unwrap();
+        assert_eq!(record, fresh);
+    }
+
+    #[tokio::test]
+    async fn copilot_device_login_generation_is_scoped_to_its_access_cache() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let other_dir = assert_fs::TempDir::new().unwrap();
+        let auth = isolated_device_auth(&dir);
+        let other = isolated_device_auth(&other_dir);
+        let (task, seen, release) = pending_device_login(&auth);
+        seen.await.unwrap();
+
+        super::clear_oauth_cache(
+            other.access_token_file.as_ref().unwrap(),
+            other.api_key_file.as_ref().unwrap(),
+        )
+        .unwrap();
+        other
+            .reauthenticate_access_token_with(async { Ok("synthetic-other-bootstrap".into()) })
+            .await
+            .unwrap();
+        release.send("synthetic-bootstrap".into()).unwrap();
+        assert_eq!(task.await.unwrap().unwrap(), "synthetic-bootstrap");
+        assert_eq!(
+            auth.read_access_token().unwrap().as_deref(),
+            Some("synthetic-bootstrap")
+        );
+        assert_eq!(
+            other.read_access_token().unwrap().as_deref(),
+            Some("synthetic-other-bootstrap")
+        );
+    }
+
+    #[tokio::test]
+    async fn copilot_failed_cache_clear_still_revokes_pending_device_login() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let auth = isolated_device_auth(&dir);
+        let (task, seen, release) = pending_device_login(&auth);
+        seen.await.unwrap();
+        // remove_file fails for a directory on every supported native platform.
+        std::fs::create_dir(auth.api_key_file.as_ref().unwrap()).unwrap();
+        assert!(
+            super::clear_oauth_cache(
+                auth.access_token_file.as_ref().unwrap(),
+                auth.api_key_file.as_ref().unwrap(),
+            )
+            .is_err()
+        );
+
+        release.send("synthetic-revoked-bootstrap".into()).unwrap();
+        assert!(task.await.unwrap().is_err());
+        assert!(!auth.access_token_file.as_ref().unwrap().exists());
+        assert!(auth.api_key_file.as_ref().unwrap().is_dir());
     }
 
     #[tokio::test]
